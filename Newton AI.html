@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Anti-Flood AI | Newton AI</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; scroll-behavior: smooth; }
+        .glass-nav { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(15px); border-bottom: 1px solid rgba(0,0,0,0.05); }
+        .card-shadow { box-shadow: 0 15px 45px -15px rgba(0,0,0,0.1); transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+        .card-shadow:hover { transform: translateY(-10px); box-shadow: 0 30px 60px -15px rgba(59, 130, 246, 0.2); }
+        .ai-scanner { position: relative; overflow: hidden; }
+        .ai-scanner::after {
+            content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 4px;
+            background: #3b82f6; animation: scan 2s infinite linear; box-shadow: 0 0 25px #3b82f6;
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+        .hero-bg { background: radial-gradient(circle at top right, #eff6ff, #ffffff); }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const MODEL_URL = "https://teachablemachine.withgoogle.com/models/RTpqxWZDZ/";
+        const OBSTRUCTION_MAP = { "clear": 5, "trash_nearby": 20, "partial_blocked": 60, "blocked": 90 };
+        const CONFIDENCE_THRESHOLD = 0.80;
+
+        // SVG Icons
+        const Icons = {
+            Camera: () => <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>,
+            Upload: () => <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>,
+            Rain: () => <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>,
+            Alert: () => <svg className="w-12 h-12 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>,
+            Verified: () => <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"/></svg>
+        };
+
+        function App() {
+            const [model, setModel] = useState(null);
+            const [activeScan, setActiveScan] = useState(null);
+            const [rainfall, setRainfall] = useState(20);
+            const [tickets, setTickets] = useState(JSON.parse(localStorage.getItem('saf_tickets')) || []);
+            const [isScanning, setIsScanning] = useState(false);
+            const [location, setLocation] = useState("");
+            const [view, setView] = useState('home');
+
+            useEffect(() => {
+                async function loadModel() {
+                    try {
+                        const m = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+                        setModel(m);
+                    } catch (e) { console.error("Lỗi tải AI", e); }
+                }
+                loadModel();
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('saf_tickets', JSON.stringify(tickets));
+            }, [tickets]);
+
+            const runPrediction = async (imageSource) => {
+                setIsScanning(true);
+                const prediction = await model.predict(imageSource);
+                const top = prediction.sort((a, b) => b.probability - a.probability)[0];
+                const key = top.className.toLowerCase().trim();
+                const obstructionValue = OBSTRUCTION_MAP[key] || 0;
+
+                setTimeout(() => {
+                    setActiveScan({
+                        label: top.className,
+                        confidence: (top.probability * 100).toFixed(1),
+                        obstruction: obstructionValue,
+                        image: captureImage(imageSource)
+                    });
+                    setIsScanning(false);
+                }, 1500);
+            };
+
+            const captureImage = (source) => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 600; canvas.height = 450;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(source, 0, 0, 600, 450);
+                return canvas.toDataURL('image/jpeg', 0.8);
+            };
+
+            const handleFileUpload = (e) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => runPrediction(img);
+                };
+                reader.readAsDataURL(e.target.files[0]);
+            };
+
+            const createTicket = () => {
+                const id = `SAF-${Math.floor(100000 + Math.random() * 900000)}`;
+                const newTicket = {
+                    id, status: 'MỚI',
+                    location: location || "45 Nguyễn Trãi, Thanh Xuân, Hà Nội",
+                    rainfall, initial: activeScan,
+                    createdAt: new Date().toLocaleString('vi-VN'),
+                    timeline: [{ time: new Date().toLocaleTimeString('vi-VN'), msg: "AI phát hiện nguy cơ cao. Tự động tạo phiếu." }]
+                };
+                setTickets([newTicket, ...tickets]);
+                setActiveScan(null);
+                alert("🚨 Đã tạo phiếu yêu cầu: " + id);
+            };
+
+            const processTicket = (id) => {
+                setTickets(tickets.map(t => t.id === id ? { ...t, status: 'ĐANG XỬ LÝ', timeline: [...t.timeline, { time: new Date().toLocaleTimeString('vi-VN'), msg: "Nhân viên môi trường đã tiếp nhận" }] } : t));
+            };
+
+            const verifyResolution = async (id, file) => {
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = async () => {
+                        const pred = await model.predict(img);
+                        const best = pred.sort((a, b) => b.probability - a.probability)[0];
+                        if (best.className.toLowerCase().trim() === "clear" && best.probability >= CONFIDENCE_THRESHOLD) {
+                            setTickets(tickets.map(t => t.id === id ? { 
+                                ...t, status: 'ĐÃ HOÀN THÀNH', 
+                                after: { label: "SẠCH", confidence: (best.probability*100).toFixed(1), image: captureImage(img) },
+                                timeline: [...t.timeline, { time: new Date().toLocaleTimeString('vi-VN'), msg: "AI xác nhận MIỆNG CỐNG SẠCH. Hoàn tất." }]
+                            } : t));
+                        } else { alert("❌ AI xác minh: Vẫn còn rác hoặc chưa đủ sạch!"); }
+                    };
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const Navbar = () => (
+                <nav className="glass-nav fixed top-0 w-full z-50 px-8 py-5">
+                    <div className="max-w-7xl mx-auto flex justify-between items-center">
+                        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('home')}>
+                            <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white font-black shadow-xl shadow-blue-200">S</div>
+                            <span className="font-extrabold tracking-tighter text-2xl uppercase italic">SMART ANTI-FLOOD <span className="text-blue-600">AI</span></span>
+                        </div>
+                        <div className="hidden lg:flex gap-10 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+                            <button onClick={() => setView('home')} className={view==='home'?'text-blue-600':''}>Trang chủ</button>
+                            <button onClick={() => setView('demo')} className={view==='demo'?'text-blue-600':''}>AI Demo</button>
+                            <button onClick={() => setView('tickets')} className={view==='tickets'?'text-blue-600':''}>Trung tâm Phiếu</button>
+                        </div>
+                        <button onClick={() => setView('demo')} className="bg-blue-600 text-white px-8 py-3.5 rounded-full text-[10px] font-black uppercase tracking-widest shadow-2xl shadow-blue-100 hover:scale-105 transition active:scale-95">Chạy Demo AI</button>
+                    </div>
+                </nav>
+            );
+
+            return (
+                <div className="min-h-screen">
+                    <Navbar />
+                    {view === 'home' && (
+                        <main className="hero-bg pt-40 pb-20 px-8">
+                            <div className="max-w-7xl mx-auto grid lg:grid-cols-2 gap-20 items-center">
+                                <div className="space-y-10 animate-in fade-in slide-in-from-left-10 duration-1000">
+                                    <div className="inline-block px-5 py-2 bg-blue-50 text-blue-600 rounded-full text-[10px] font-black uppercase tracking-[0.3em]">Hệ thống đô thị thông minh</div>
+                                    <h1 className="text-7xl font-black tracking-tighter leading-[0.85] text-slate-900 italic uppercase">Phát hiện sớm.<br/><span className="text-blue-600">Ngăn ngập</span> kịp thời.</h1>
+                                    <p className="text-xl text-slate-500 font-medium leading-relaxed max-w-lg italic">"AI không thay con người xử lý ngập - AI giúp con người nhìn thấy nguy cơ sớm hơn."</p>
+                                    <div className="flex gap-5 pt-5">
+                                        <button onClick={() => setView('demo')} className="px-12 py-6 bg-slate-900 text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.2em] shadow-2xl shadow-slate-300">Dùng thử AI</button>
+                                        <button onClick={() => setView('tickets')} className="px-12 py-6 bg-white border border-slate-200 rounded-[2rem] font-black text-xs uppercase tracking-[0.2em] text-slate-500">Quản lý phiếu</button>
+                                    </div>
+                                </div>
+                                <div className="relative">
+                                    <div className="card-shadow bg-white p-6 rounded-[3rem] border border-slate-100 relative z-10">
+                                        <img src="https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=800&q=80" className="rounded-[2rem]" alt="Hero" />
+                                        <div className="absolute -bottom-10 -left-10 bg-white p-8 rounded-[2.5rem] card-shadow border border-slate-100 animate-bounce-slow">
+                                            <div className="flex items-center gap-5">
+                                                <Icons.Alert />
+                                                <div>
+                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Trạng thái rủi ro</div>
+                                                    <div className="font-black text-slate-900 text-xl italic uppercase tracking-tighter">Mưa lớn + Tắc cống</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-blue-400 rounded-full blur-[120px] opacity-20"></div>
+                                </div>
+                            </div>
+                        </main>
+                    )}
+
+                    {view === 'demo' && (
+                        <section className="pt-32 pb-20 px-8 max-w-7xl mx-auto space-y-10">
+                            <div className="grid lg:grid-cols-12 gap-10">
+                                <div className="lg:col-span-5 space-y-8">
+                                    <div className="card-shadow bg-white p-8 rounded-[3rem] border border-slate-100">
+                                        <h3 className="text-xs font-black text-blue-600 uppercase tracking-[0.2em] mb-8 flex items-center gap-3">01 — PHÂN TÍCH HÌNH ẢNH</h3>
+                                        <div className={`rounded-[2rem] bg-slate-900 aspect-video mb-8 overflow-hidden border-8 border-slate-50 shadow-inner ${isScanning ? 'ai-scanner' : ''}`}>
+                                            {activeScan ? <img src={activeScan.image} className="w-full h-full object-cover" /> : <div className="h-full flex flex-col items-center justify-center text-slate-600 text-[10px] font-black uppercase tracking-widest animate-pulse italic">Đang chờ hình ảnh...</div>}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <label className="bg-slate-900 text-white py-5 rounded-2xl font-black text-[10px] uppercase tracking-widest text-center cursor-pointer flex items-center justify-center gap-2 hover:bg-black transition">
+                                                <Icons.Upload /> Tải ảnh lên
+                                                <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} />
+                                            </label>
+                                            <button className="bg-slate-100 py-5 rounded-2xl font-black text-[10px] uppercase tracking-widest text-slate-500 flex items-center justify-center gap-2 hover:bg-slate-200">
+                                                <Icons.Camera /> Chụp Camera
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="card-shadow bg-white p-8 rounded-[3rem] border border-slate-100 space-y-8">
+                                        <h3 className="text-xs font-black text-blue-600 uppercase tracking-[0.2em] italic">02 — THÔNG SỐ MÔ PHỎNG</h3>
+                                        <div className="space-y-6">
+                                            <div>
+                                                <div className="flex justify-between text-[10px] font-black text-slate-400 mb-4 uppercase tracking-widest">Lượng mưa: <span className="text-blue-600 text-xl font-black italic">{rainfall} MM/H</span></div>
+                                                <input type="range" min="0" max="150" value={rainfall} onChange={(e)=>setRainfall(e.target.value)} className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+                                            </div>
+                                            <input type="text" placeholder="Nhập vị trí miệng cống..." className="w-full p-5 bg-slate-50 rounded-2xl text-xs font-bold border border-slate-100 focus:ring-2 focus:ring-blue-500 outline-none transition" value={location} onChange={(e)=>setLocation(e.target.value)} />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="lg:col-span-7">
+                                    {!activeScan && !isScanning ? (
+                                        <div className="h-full border-4 border-dashed border-slate-200 rounded-[4rem] flex flex-col items-center justify-center text-slate-300 p-20 text-center space-y-8">
+                                            <div className="text-[120px] opacity-10">🤖</div>
+                                            <div className="text-xs font-black uppercase tracking-[0.3em] italic">Vui lòng nhập dữ liệu để AI phân tích</div>
+                                        </div>
+                                    ) : isScanning ? (
+                                        <div className="h-full bg-white rounded-[4rem] card-shadow flex flex-col items-center justify-center p-20 space-y-10 border border-slate-50">
+                                            <div className="w-20 h-20 border-[8px] border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                                            <h4 className="font-black text-3xl animate-pulse text-blue-600 uppercase italic tracking-tighter">AI Đang xử lý dữ liệu...</h4>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-10 duration-700">
+                                            <div className="card-shadow bg-blue-600 text-white p-12 rounded-[4rem] relative overflow-hidden">
+                                                <div className="relative z-10 space-y-10">
+                                                    <div className="flex justify-between items-start">
+                                                        <div>
+                                                            <h4 className="text-[10px] font-black uppercase tracking-[0.3em] opacity-60 mb-3 italic">Kết quả nhận diện AI</h4>
+                                                            <div className="text-6xl font-black italic uppercase leading-none">{activeScan.label.replace('Blocked','Bị Tắc').replace('Clear','Sạch').replace('Trash_Nearby','Rác lân cận').replace('Partial_Blocked','Tắc một phần')}</div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <h4 className="text-[10px] font-black uppercase tracking-[0.3em] opacity-60 mb-3 italic">Độ tin cậy</h4>
+                                                            <div className="text-6xl font-black italic">{activeScan.confidence}%</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-8">
+                                                        <div className="bg-white/10 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-2xl">
+                                                            <div className="text-[9px] font-black uppercase tracking-widest opacity-60 mb-3 italic">Độ tắc (Ước tính)</div>
+                                                            <div className="text-5xl font-black italic">{activeScan.obstruction}%</div>
+                                                        </div>
+                                                        <div className="bg-white/10 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-2xl">
+                                                            <div className="text-[9px] font-black uppercase tracking-widest opacity-60 mb-3 italic">Ngưỡng mưa</div>
+                                                            <div className="text-3xl font-black italic uppercase">{rainfall > 50 ? 'RẤT LỚN' : 'BÌNH THƯỜNG'}</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="card-shadow bg-white p-12 rounded-[4rem] border border-slate-100 flex flex-col md:flex-row items-center gap-12">
+                                                <div className={`flex-1 p-10 rounded-[3rem] text-center border-4 shadow-xl ${activeScan.obstruction > 80 && rainfall > 50 ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
+                                                    <div className="text-[10px] font-black uppercase mb-3 opacity-60 italic tracking-widest">Trạng thái rủi ro</div>
+                                                    <div className={`text-4xl font-black uppercase italic leading-none ${activeScan.obstruction > 80 && rainfall > 50 ? 'text-red-600 animate-pulse' : 'text-emerald-600'}`}>
+                                                        {activeScan.obstruction > 80 && rainfall > 50 ? '⚠️ Nguy cơ Ngập Cao' : '✅ Hệ thống An toàn'}
+                                                    </div>
+                                                </div>
+                                                {activeScan.obstruction > 80 && rainfall > 50 && (
+                                                    <button onClick={createTicket} className="w-full md:w-auto px-12 py-8 bg-red-600 text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.3em] hover:bg-red-700 shadow-2xl shadow-red-200">Tạo phiếu khẩn</button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </section>
+                    )}
+
+                    {view === 'tickets' && (
+                        <section className="pt-32 pb-20 px-8 max-w-6xl mx-auto">
+                            <div className="flex flex-col md:flex-row justify-between items-end gap-10 mb-16 italic">
+                                <div>
+                                    <h2 className="text-5xl font-black uppercase italic tracking-tighter leading-none mb-3">Trung tâm Quản lý Phiếu</h2>
+                                    <p className="text-slate-400 font-medium uppercase text-xs tracking-widest">Hệ thống xử lý & Xác minh AI khép kín</p>
+                                </div>
+                                <div className="flex gap-4">
+                                    <div className="bg-white p-6 rounded-3xl card-shadow border border-slate-50 text-center min-w-[120px]">
+                                        <div className="text-3xl font-black text-red-500">{tickets.filter(t=>t.status==='MỚI').length}</div>
+                                        <div className="text-[9px] font-black uppercase text-slate-300">Chưa nhận</div>
+                                    </div>
+                                    <div className="bg-white p-6 rounded-3xl card-shadow border border-slate-50 text-center min-w-[120px]">
+                                        <div className="text-3xl font-black text-emerald-500">{tickets.filter(t=>t.status==='ĐÃ HOÀN THÀNH').length}</div>
+                                        <div className="text-[9px] font-black uppercase text-slate-300">Hoàn thành</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="space-y-10 italic">
+                                {tickets.length === 0 ? (
+                                    <div className="py-40 text-center card-shadow bg-white rounded-[4rem] text-slate-300 font-black uppercase tracking-[0.3em] italic border-4 border-dashed border-slate-100">Hệ thống chưa ghi nhận phiếu nào</div>
+                                ) : tickets.map(t => (
+                                    <div key={t.id} className={`bg-white rounded-[3rem] card-shadow border-l-[16px] overflow-hidden ${t.status==='MỚI'?'border-red-500':t.status==='ĐANG XỬ LÝ'?'border-amber-500':'border-emerald-500'}`}>
+                                        <div className="p-12 space-y-10">
+                                            <div className="flex flex-col lg:flex-row justify-between items-start gap-8">
+                                                <div className="space-y-3">
+                                                    <span className={`px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest ${t.status==='MỚI'?'bg-red-50 text-red-500':'bg-emerald-50 text-emerald-500'}`}>{t.status}</span>
+                                                    <h3 className="text-4xl font-black uppercase italic leading-none">{t.id}</h3>
+                                                    <div className="text-sm font-bold text-slate-400 uppercase tracking-tighter italic">📍 {t.location} • 🌧️ {t.rainfall} MM/H</div>
+                                                </div>
+                                                <div className="flex gap-4">
+                                                    {t.status === 'MỚI' && <button onClick={()=>processTicket(t.id)} className="px-10 py-5 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest">Nhận phiếu</button>}
+                                                    {t.status === 'ĐANG XỬ LÝ' && (
+                                                        <label className="px-10 py-5 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest cursor-pointer hover:bg-blue-700 transition">
+                                                            Gửi ảnh xác minh AI
+                                                            <input type="file" className="hidden" onChange={(e)=>verifyResolution(t.id, e.target.files[0])} />
+                                                        </label>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="grid md:grid-cols-2 gap-8 italic">
+                                                <div className="space-y-4">
+                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Hình ảnh: Trước xử lý</div>
+                                                    <img src={t.initial.image} className="w-full h-56 object-cover rounded-[2rem] shadow-inner grayscale opacity-60 border-2 border-slate-100" />
+                                                </div>
+                                                {t.after && (
+                                                    <div className="space-y-4 animate-in zoom-in duration-500">
+                                                        <div className="text-[10px] font-black text-emerald-600 uppercase tracking-widest italic flex items-center gap-2">Sau xử lý: AI XÁC MINH SẠCH <Icons.Verified /></div>
+                                                        <img src={t.after.image} className="w-full h-56 object-cover rounded-[2rem] shadow-2xl border-4 border-emerald-100 shadow-emerald-50" />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="pt-8 border-t border-slate-50 italic">
+                                                <div className="text-[10px] font-black text-slate-300 uppercase tracking-widest mb-4">Lịch trình công việc</div>
+                                                {t.timeline.map((log, i) => (
+                                                    <div key={i} className="flex gap-4 text-[10px] font-bold text-slate-400 mb-2 italic">
+                                                        <span className="text-blue-600">{log.time}</span> <span>{log.msg}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                    )}
+
+                    <footer className="bg-slate-950 text-white py-24 px-8 mt-20">
+                        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-16">
+                            <div className="space-y-6">
+                                <div className="text-4xl font-black italic tracking-tighter uppercase">NHÓM NEWTON <span className="text-blue-600">AI</span></div>
+                                <p className="text-slate-500 text-sm max-w-sm font-bold uppercase italic leading-relaxed tracking-wider">Hệ thống đô thị thông minh ngăn ngừa ngập lụt bằng AI thời gian thực.</p>
+                            </div>
+                            <div className="text-[9px] font-black text-slate-700 uppercase tracking-[0.5em] italic">AI SEES THE RISK • PEOPLE TAKE ACTION</div>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
